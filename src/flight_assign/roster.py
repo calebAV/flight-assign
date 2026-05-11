@@ -1,4 +1,4 @@
-"""Roster: read most recent WEEKLY_SCHEDULE_JSON from #flight-assign,
+"""Roster: read most recent WEEKLY_SCHEDULE_JSON from a Slack channel,
 resolve who's on shift right now in Atlanta local time.
 
 The schedule format is owned by the schedule-converter skill:
@@ -21,6 +21,7 @@ Outside those windows we return no operators (cron will skip posting).
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
@@ -44,12 +45,10 @@ _WEEKDAY_NAMES = [
     "sunday",
 ]
 
-# Captures the JSON body inside a triple-backtick block following the
-# "WEEKLY_SCHEDULE_JSON" header. Tolerates an optional ```json language hint.
-_SCHEDULE_RE = re.compile(
-    r"WEEKLY_SCHEDULE_JSON\s*```(?:json)?\s*(\{.*?\})\s*```",
-    re.DOTALL,
-)
+# Marker required at the top of a schedule message.
+_HEADER_RE = re.compile(r"WEEKLY_SCHEDULE_JSON", re.IGNORECASE)
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,15 +74,63 @@ def current_weekday_key(now_utc: datetime | None = None) -> str:
     return _WEEKDAY_NAMES[now_utc.astimezone(ATLANTA_TZ).weekday()]
 
 
+def _first_balanced_json_object(text: str, start: int) -> dict | None:
+    """Walk `text` starting at index `start`, find the next `{...}` with
+    balanced braces (respecting JSON strings), and return the parsed object.
+    Returns None on no match or parse failure.
+    """
+    open_idx = text.find("{", start)
+    if open_idx == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    i = open_idx
+    while i < len(text):
+        c = text[i]
+        if escape:
+            escape = False
+        elif c == "\\" and in_string:
+            escape = True
+        elif c == '"':
+            in_string = not in_string
+        elif not in_string:
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[open_idx : i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        return None
+        i += 1
+    return None
+
+
 def parse_schedule_message(text: str) -> dict | None:
-    """Extract the WEEKLY_SCHEDULE_JSON object from a Slack message body."""
-    m = _SCHEDULE_RE.search(text or "")
-    if not m:
+    """Extract WEEKLY_SCHEDULE_JSON from a Slack message body.
+
+    Tolerant of formatting: works whether the JSON is wrapped in triple
+    backticks, a ```json fence, or nothing at all. Strategy: locate the
+    header, then extract the next balanced JSON object after it.
+    """
+    if not text:
         return None
-    try:
-        return json.loads(m.group(1))
-    except json.JSONDecodeError:
+    header = _HEADER_RE.search(text)
+    if not header:
         return None
+    obj = _first_balanced_json_object(text, header.end())
+    if obj is None:
+        # Header present but JSON unparseable — likely a stale or broken paste.
+        log.warning(
+            "Found WEEKLY_SCHEDULE_JSON header but could not parse a JSON "
+            "object after it. Message preview: %r",
+            text[: min(200, len(text))],
+        )
+        return None
+    return obj
 
 
 def find_latest_schedule(messages: Iterable[dict]) -> dict | None:

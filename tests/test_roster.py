@@ -124,3 +124,52 @@ def test_operators_on_shift_shift2():
     t = datetime(2026, 5, 11, 20, 0, tzinfo=timezone.utc)
     ops = operators_on_shift(sched, t)
     assert ops == [Operator(name="David Cobos", role="Production")]
+
+
+def test_parse_schedule_message_without_backticks():
+    """Tolerant parser: header + JSON, no code fence at all."""
+    msg = '''WEEKLY_SCHEDULE_JSON
+{"weekOf":"2026-05-11","days":{"monday":{"shift1":[{"name":"X","role":"Production"}],"shift2":[]}}}
+'''
+    sched = parse_schedule_message(msg)
+    assert sched is not None
+    assert sched["weekOf"] == "2026-05-11"
+
+
+def test_parse_schedule_message_with_extra_text_around_json():
+    """Tolerant parser: ignores leading/trailing chatter outside the JSON."""
+    msg = (
+        "Hey team! WEEKLY_SCHEDULE_JSON for the week:\n\n"
+        '{"weekOf":"2026-05-11","days":{}}\n\n'
+        "Let me know if anything's wrong."
+    )
+    sched = parse_schedule_message(msg)
+    assert sched == {"weekOf": "2026-05-11", "days": {}}
+
+
+def test_parse_schedule_message_with_nested_braces():
+    """Brace counting must respect nested objects."""
+    msg = (
+        "WEEKLY_SCHEDULE_JSON\n"
+        '{"weekOf":"2026-05-11","days":{"monday":{"shift1":['
+        '{"name":"A","role":"Production"}],"shift2":[]}}}'
+    )
+    sched = parse_schedule_message(msg)
+    assert sched["days"]["monday"]["shift1"][0]["name"] == "A"
+
+
+def test_parse_schedule_message_header_present_but_no_json():
+    """Header in chatter, no JSON body → returns None, doesn't crash."""
+    msg = "Reminder: post WEEKLY_SCHEDULE_JSON every Friday before EOD"
+    assert parse_schedule_message(msg) is None
+
+
+def test_parse_schedule_message_braces_in_strings_ignored():
+    """A `{` inside a JSON string should not bump brace depth."""
+    msg = (
+        "WEEKLY_SCHEDULE_JSON\n"
+        '{"weekOf":"2026-05-11","note":"see }} below","days":{}}'
+    )
+    sched = parse_schedule_message(msg)
+    assert sched is not None
+    assert sched["note"] == "see }} below"

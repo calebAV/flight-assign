@@ -1,19 +1,23 @@
-"""Slack I/O: read recent #flight-assign history, send assignment messages."""
+"""Slack I/O: scan a channel for the schedule, post assignments elsewhere."""
 
 from __future__ import annotations
 
-from typing import Iterable
+import logging
+from typing import Callable, Iterable
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-# Default history scan: 50 messages is plenty — the schedule is usually
-# the most recent JSON-looking message, posted weekly.
-DEFAULT_HISTORY_LIMIT = 50
+DEFAULT_MAX_SCAN = 2000
+PAGE_SIZE = 200
+
+log = logging.getLogger(__name__)
 
 
 class SlackClient:
-    """Thin wrapper around slack_sdk for the two calls we need."""
+    """Wraps slack_sdk. The default `channel_id` is used by `post()`; pass
+    a `channel_id=` override to `find_message()` to read from a different
+    channel (e.g. a dedicated #flight-assign-schedule)."""
 
     def __init__(self, bot_token: str, channel_id: str):
         if not bot_token:
@@ -23,19 +27,47 @@ class SlackClient:
         self._client = WebClient(token=bot_token)
         self._channel_id = channel_id
 
-    def recent_messages(self, limit: int = DEFAULT_HISTORY_LIMIT) -> list[dict]:
-        """Return up to `limit` recent messages, newest first."""
-        try:
-            resp = self._client.conversations_history(
-                channel=self._channel_id,
-                limit=limit,
-            )
-        except SlackApiError as exc:
-            raise RuntimeError(f"Slack history fetch failed: {exc.response['error']}") from exc
-        return list(resp.get("messages", []))
+    def find_message(
+        self,
+        predicate: Callable[[dict], bool],
+        *,
+        channel_id: str | None = None,
+        max_scan: int = DEFAULT_MAX_SCAN,
+    ) -> tuple[dict | None, int]:
+        """Scan a channel newest-first, return (first match, n_scanned).
+
+        `channel_id` defaults to the client's default channel.
+        """
+        target_channel = channel_id or self._channel_id
+        cursor: str | None = None
+        scanned = 0
+        while scanned < max_scan:
+            page_limit = min(PAGE_SIZE, max_scan - scanned)
+            kwargs: dict = {"channel": target_channel, "limit": page_limit}
+            if cursor:
+                kwargs["cursor"] = cursor
+            try:
+                resp = self._client.conversations_history(**kwargs)
+            except SlackApiError as exc:
+                raise RuntimeError(
+                    f"Slack history fetch failed for channel {target_channel}: "
+                    f"{exc.response['error']}"
+                ) from exc
+
+            messages = resp.get("messages", []) or []
+            for msg in messages:
+                scanned += 1
+                if predicate(msg):
+                    return msg, scanned
+
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+            if not cursor or not messages:
+                break
+
+        return None, scanned
 
     def post(self, text: str, *, blocks: Iterable[dict] | None = None) -> str:
-        """Post a message; return the ts of the posted message."""
+        """Post a message to the default channel; return the ts."""
         try:
             resp = self._client.chat_postMessage(
                 channel=self._channel_id,

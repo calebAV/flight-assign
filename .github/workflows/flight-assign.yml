@@ -2,9 +2,7 @@ name: flight-assign
 
 on:
   schedule:
-    # Every 15 minutes. GitHub cron is UTC; we filter to ATL shift hours
-    # inside the program (roster.current_shift_key returns None outside
-    # 05:30-22:00 ET), so off-hours runs are no-ops.
+    # Backup schedule — primary trigger is cron-job.org. Every 15 min UTC.
     - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
@@ -38,6 +36,7 @@ jobs:
           AEROVECT_CLIENT_SECRET: ${{ secrets.AEROVECT_CLIENT_SECRET }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_SCHEDULE_CHANNEL_ID: ${{ secrets.SLACK_SCHEDULE_CHANNEL_ID }}
           AIRPORT: ATL
           AIRLINE: DL
           HOURS_FORWARD: "9"

@@ -4,11 +4,17 @@ Required environment variables:
   AEROVECT_CLIENT_ID
   AEROVECT_CLIENT_SECRET
   SLACK_BOT_TOKEN
-  SLACK_CHANNEL_ID         (default: C0AQEA7NR28 = #flight-assign)
-  AIRPORT                  (default: ATL)
-  AIRLINE                  (default: DL)
-  HOURS_FORWARD            (default: 9)
-  DRY_RUN                  ("1" or "true" to skip the Slack post)
+  SLACK_CHANNEL_ID            Channel to POST assignments to
+                              (default: C0AQEA7NR28 = #flight-assign).
+  SLACK_SCHEDULE_CHANNEL_ID   Channel to READ schedules from. Optional.
+                              If unset, defaults to SLACK_CHANNEL_ID
+                              (single-channel mode, backward compatible).
+                              Set this to your #flight-assign-schedule channel.
+  AIRPORT                     (default: ATL)
+  AIRLINE                     (default: DL)
+  HOURS_FORWARD               (default: 9)
+  SLACK_HISTORY_MAX_SCAN      (default: 2000)
+  DRY_RUN                     ("1"/"true" to skip the Slack post)
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from .aerovect import AeroVectClient
 from .assign import assign_flights, snapshot_to_flight
 from .format import format_message
 from .gates import filter_snapshots
-from .roster import find_latest_schedule, operators_on_shift
+from .roster import operators_on_shift, parse_schedule_message
 from .slack_io import SlackClient
 
 DEFAULT_CHANNEL_ID = "C0AQEA7NR28"  # #flight-assign
@@ -50,11 +56,21 @@ def run() -> int:
     client_id = _env("AEROVECT_CLIENT_ID", required=True)
     client_secret = _env("AEROVECT_CLIENT_SECRET", required=True)
     slack_token = _env("SLACK_BOT_TOKEN", required=True)
-    channel_id = _env("SLACK_CHANNEL_ID", default=DEFAULT_CHANNEL_ID)
+    post_channel = _env("SLACK_CHANNEL_ID", default=DEFAULT_CHANNEL_ID)
+    schedule_channel = _env("SLACK_SCHEDULE_CHANNEL_ID", default=post_channel)
     airport = _env("AIRPORT", default="ATL").upper()
     airline = _env("AIRLINE", default="DL").upper()
     hours_forward = int(_env("HOURS_FORWARD", default="9"))
+    max_scan = int(_env("SLACK_HISTORY_MAX_SCAN", default="2000"))
     dry_run = _truthy(_env("DRY_RUN", default=""))
+
+    if schedule_channel != post_channel:
+        log.info(
+            "channels: read schedule from %s, post assignments to %s",
+            schedule_channel, post_channel,
+        )
+    else:
+        log.info("channels: single-channel mode (%s)", post_channel)
 
     # 1) Pull flights.
     av = AeroVectClient(client_id, client_secret)
@@ -63,18 +79,29 @@ def run() -> int:
 
     # Filter: airline + target gates.
     snapshots = [s for s in snapshots if (s.get("airline_cde") or "").upper() == airline]
+    log.info("after airline filter (%s): %d snapshots", airline, len(snapshots))
     snapshots = filter_snapshots(snapshots)
-    log.info("after airline+gate filter: %d snapshots", len(snapshots))
+    log.info("after gate filter (T + A1-A18): %d snapshots", len(snapshots))
 
     flights = [f for f in (snapshot_to_flight(s) for s in snapshots) if f is not None]
 
-    # 2) Read roster.
-    slack = SlackClient(slack_token, channel_id)
-    messages = slack.recent_messages(limit=80)
-    schedule = find_latest_schedule(messages)
-    if schedule is None:
-        log.error("no WEEKLY_SCHEDULE_JSON found in recent channel history")
+    # 2) Read roster — paginate Slack history until we find the schedule.
+    slack = SlackClient(slack_token, post_channel)
+    matched_msg, scanned = slack.find_message(
+        lambda m: parse_schedule_message(m.get("text") or "") is not None,
+        channel_id=schedule_channel,
+        max_scan=max_scan,
+    )
+    if matched_msg is None:
+        log.error(
+            "no WEEKLY_SCHEDULE_JSON found in channel %s after scanning %d "
+            "messages. Re-post the schedule via the schedule-converter skill.",
+            schedule_channel, scanned,
+        )
         return 2
+    schedule = parse_schedule_message(matched_msg["text"])
+    log.info("found WEEKLY_SCHEDULE_JSON after scanning %d messages", scanned)
+
     operators = operators_on_shift(schedule)
     log.info("on-shift operators: %d", len(operators))
 
@@ -97,7 +124,7 @@ def run() -> int:
         return 0
 
     ts = slack.post(body)
-    log.info("posted ts=%s to channel=%s", ts, channel_id)
+    log.info("posted ts=%s to channel=%s", ts, post_channel)
     return 0
 
 
