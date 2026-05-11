@@ -137,26 +137,25 @@ def run() -> int:
             [s.get("flight_key") for s in snapshots[:3]],
         )
 
-    # Count PARTIAL flight_keys — those are the data-feed-degraded ones.
-    partial_count = sum(
-        1 for s in snapshots
-        if (s.get("flight_key") or "").startswith("PARTIAL")
-    )
-    feed_health = FeedHealth(total=total_snapshots, partial=partial_count)
-    if partial_count:
+    # Count snapshots with NO usable gate (after applying dptr_gate fallback).
+    # That's the true "data degraded" signal — PARTIAL keys alone are fine
+    # when dptr_gate is populated.
+    from .aerovect import snapshot_gate
+    no_gate_count = sum(1 for s in snapshots if not snapshot_gate(s))
+    feed_health = FeedHealth(total=total_snapshots, partial=no_gate_count)
+    if no_gate_count:
         log.warning(
-            "%d of %d snapshots are PARTIAL — Delta has not sent augmented "
-            "columns (airline_cde / gate / pier). Affected flights cannot be "
-            "assigned. Contact AeroVect support if this persists.",
-            partial_count, total_snapshots,
+            "%d of %d snapshots have no usable gate (neither `gate` nor "
+            "`dptr_gate` is populated). Those flights cannot be assigned.",
+            no_gate_count, total_snapshots,
         )
 
     # Airline distribution (PARTIAL keys will show up as "?")
-    code_counts = Counter(snapshot_airline(s) or "?" for s in snapshots)
+    code_counts = Counter(snapshot_airline(s, default="DL") or "?" for s in snapshots)
     log.info("airline code distribution (with flight_key fallback): %s",
              dict(code_counts))
 
-    snapshots = [s for s in snapshots if snapshot_airline(s) in airlines]
+    snapshots = [s for s in snapshots if snapshot_airline(s, default="DL") in airlines]
     log.info(
         "after airline filter (%s): %d snapshots",
         "/".join(airlines), len(snapshots),

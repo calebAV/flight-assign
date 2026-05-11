@@ -44,3 +44,85 @@ def test_handles_lowercase_partial_in_flight_key_robustly():
     # doc uses uppercase.
     snap = {"flight_key": "2026-05-04#DL#1234#ATL#GSP"}
     assert snapshot_airline(snap) == "DL"
+
+
+from flight_assign.aerovect import snapshot_gate, snapshot_pier
+
+
+# --- snapshot_airline default param ---
+
+
+def test_snapshot_airline_uses_default_for_partial():
+    snap = {"airline_cde": None, "flight_key": "PARTIAL#2026-05-11#1234"}
+    assert snapshot_airline(snap, default="DL") == "DL"
+
+
+def test_snapshot_airline_default_is_empty_unless_passed():
+    snap = {"airline_cde": None, "flight_key": "PARTIAL#2026-05-11#1234"}
+    assert snapshot_airline(snap) == ""
+
+
+def test_snapshot_airline_real_data_overrides_default():
+    """If the API DOES give us an airline, we use it regardless of default."""
+    snap = {"airline_cde": "DAL", "flight_key": "PARTIAL#2026-05-11#1234"}
+    assert snapshot_airline(snap, default="DL") == "DAL"
+
+
+# --- snapshot_gate ---
+
+
+def test_snapshot_gate_prefers_documented_field():
+    assert snapshot_gate({"gate": "A14", "dptr_gate": "B5"}) == "A14"
+
+
+def test_snapshot_gate_falls_back_to_dptr_gate():
+    assert snapshot_gate({"gate": None, "dptr_gate": "A14"}) == "A14"
+
+
+def test_snapshot_gate_uppercases():
+    assert snapshot_gate({"dptr_gate": "a14"}) == "A14"
+
+
+def test_snapshot_gate_empty_when_neither():
+    assert snapshot_gate({}) == ""
+    assert snapshot_gate({"gate": "", "dptr_gate": ""}) == ""
+
+
+# --- snapshot_pier ---
+
+
+def test_snapshot_pier_prefers_documented_field():
+    assert snapshot_pier({"pier": "T", "dptr_gate": "A14"}) == "T"
+
+
+def test_snapshot_pier_derived_from_gate_letter():
+    assert snapshot_pier({"dptr_gate": "A14"}) == "A"
+    assert snapshot_pier({"dptr_gate": "T05"}) == "T"
+
+
+def test_snapshot_pier_handles_lowercase_gate():
+    assert snapshot_pier({"dptr_gate": "a14"}) == "A"
+
+
+def test_snapshot_pier_empty_when_no_data():
+    assert snapshot_pier({}) == ""
+
+
+# --- end-to-end with real-shape data from Caleb's curl ---
+
+
+def test_real_world_partial_snapshot_with_dptr_gate_kept_by_filter():
+    """The fix: PARTIAL flight_key + dptr_gate=A05 should be a kept Delta flight."""
+    from flight_assign.gates import filter_snapshots
+    snap = {
+        "flight_key": "PARTIAL#2026-05-11#1575",
+        "flt_num": "1575",
+        "dptr_gate": "A05",
+        "leg_dest_ap_cde": "JFK",
+        "mission_time": 1778521620000,
+        "time_type": "E",
+    }
+    assert filter_snapshots([snap]) == [snap]
+    assert snapshot_airline(snap, default="DL") == "DL"
+    assert snapshot_gate(snap) == "A05"
+    assert snapshot_pier(snap) == "A"

@@ -95,7 +95,7 @@ class AeroVectClient:
         return resp.json().get("snapshots", [])
 
 
-def snapshot_airline(snap: dict) -> str:
+def snapshot_airline(snap: dict, *, default: str = "") -> str:
     """Recover the airline code from a snapshot, even when airline_cde is null.
 
     Strategy:
@@ -115,10 +115,36 @@ def snapshot_airline(snap: dict) -> str:
 
     fk = (snap.get("flight_key") or "").strip()
     if not fk or fk.startswith("PARTIAL"):
-        return ""
+        return default
 
     parts = fk.split("#")
     # Expected shape: parts[0]=date, parts[1]=airline, parts[2]=fltnum, ...
     if len(parts) >= 2 and parts[1]:
         return parts[1].upper()
+    return default
+
+
+def snapshot_gate(snap: dict) -> str:
+    """Return the gate string from a snapshot, with field-name fallbacks.
+
+    The API doc says the field is `gate`, but the actual production data
+    uses `dptr_gate`. Try documented first, fall back to observed.
+    """
+    return str(snap.get("gate") or snap.get("dptr_gate") or "").strip().upper()
+
+
+def snapshot_pier(snap: dict) -> str:
+    """Return the pier letter from a snapshot, with field-name fallbacks.
+
+    The API doc says `pier` exists; production data doesn't have it as a
+    letter (there is a `dptr_bag_pier_num` but that's a numeric ramp ID).
+    Fall back to deriving the pier from the gate's leading letter:
+    "A30" -> "A", "T05" -> "T".
+    """
+    pier = str(snap.get("pier") or "").strip().upper()
+    if pier:
+        return pier
+    gate = snapshot_gate(snap)
+    if gate and gate[0].isalpha():
+        return gate[0]
     return ""

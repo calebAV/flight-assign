@@ -79,14 +79,15 @@ def _feed_health_line(health: FeedHealth | None) -> str | None:
         return None
     if health.all_partial:
         return (
-            f":warning: *Data feed degraded* — all {health.total} flights "
-            f"in window are PARTIAL (Delta hasn't sent gate/airline columns "
-            f"yet). No assignments possible. Contact AeroVect support."
+            f":warning: *Data feed degraded* — none of the {health.total} "
+            f"flights in window have a usable gate. No assignments possible. "
+            f"Contact AeroVect support."
         )
     if health.partial_ratio >= 0.5:
         return (
-            f":warning: {health.partial} of {health.total} flights are PARTIAL "
-            f"({int(round(health.partial_ratio*100))}%) — assignments limited."
+            f":warning: {health.partial} of {health.total} flights have no "
+            f"usable gate ({int(round(health.partial_ratio*100))}%) — "
+            f"assignments limited."
         )
     return None
 

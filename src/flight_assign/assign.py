@@ -63,17 +63,24 @@ class AssignmentResult:
 
 
 def snapshot_to_flight(snap: dict) -> Flight | None:
-    """Build a Flight from a /nexus/snapshots row. Returns None if unusable."""
+    """Build a Flight from a /nexus/snapshots row. Returns None if unusable.
+
+    Uses the snapshot_gate/snapshot_pier/snapshot_airline helpers so we
+    pick up the actual field names the API returns (dptr_gate etc.) and
+    fall back to "DL" for airline since the endpoint is Delta-only.
+    """
+    from .aerovect import snapshot_airline, snapshot_gate, snapshot_pier
+
     departure_ms = snap.get("mission_time")
     if not isinstance(departure_ms, int):
         return None
     return Flight(
         flight_key=snap.get("flight_key") or "",
         flt_num=str(snap.get("flt_num") or ""),
-        airline=str(snap.get("airline_cde") or ""),
+        airline=snapshot_airline(snap, default="DL"),
         dest=str(snap.get("leg_dest_ap_cde") or ""),
-        gate=str(snap.get("gate") or ""),
-        pier=str(snap.get("pier") or ""),
+        gate=snapshot_gate(snap),
+        pier=snapshot_pier(snap),
         departure_ms=int(departure_ms),
         time_type=str(snap.get("time_type") or "S"),
     )
