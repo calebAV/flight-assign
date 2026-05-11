@@ -25,7 +25,7 @@ import sys
 import time
 from collections import Counter
 
-from .aerovect import AeroVectClient
+from .aerovect import AeroVectClient, snapshot_airline
 from .assign import assign_flights, snapshot_to_flight
 from .format import ScheduleSource, format_message
 from .gates import filter_snapshots
@@ -42,10 +42,9 @@ log = logging.getLogger("flight_assign")
 
 
 def _env(name: str, default: str | None = None, *, required: bool = False) -> str:
-    """Read env var. Treats empty string the same as unset — so GitHub Actions
-    passing an unset secret as `""` still falls back to the default."""
+    """Read env var. Treats empty string the same as unset."""
     val = os.environ.get(name)
-    if not val:  # None OR empty string
+    if not val:
         val = default
     if required and not val:
         raise SystemExit(f"Missing required env var: {name}")
@@ -57,14 +56,12 @@ def _truthy(v: str) -> bool:
 
 
 def _parse_airline_list(raw: str) -> list[str]:
-    """Split a comma-separated airline-codes string into a normalized list."""
     return [a.strip().upper() for a in raw.split(",") if a.strip()]
 
 
 def _resolve_schedule(
     slack: SlackClient, channel_id: str, max_scan: int
 ) -> tuple[dict | None, ScheduleSource | None]:
-    """Find the newest valid WEEKLY_SCHEDULE_JSON in the channel."""
     def is_schedule(msg: dict) -> bool:
         return parse_schedule_message(msg.get("text") or "") is not None
 
@@ -76,8 +73,7 @@ def _resolve_schedule(
     if matched is None:
         log.error(
             "no WEEKLY_SCHEDULE_JSON found in channel %s after scanning %d "
-            "messages. Re-post the schedule via the schedule-converter skill.",
-            channel_id, scanned,
+            "messages.", channel_id, scanned,
         )
         return None, None
 
@@ -93,8 +89,7 @@ def _resolve_schedule(
     )
     if actual_week != expected_week:
         log.warning(
-            "schedule weekOf %s does not match current week %s. "
-            "Re-post the schedule if this is stale.",
+            "schedule weekOf %s does not match current week %s.",
             actual_week, expected_week,
         )
 
@@ -135,15 +130,18 @@ def run() -> int:
     snapshots = av.get_snapshots(airport, hours_back=0, hours_forward=hours_forward)
     log.info("fetched %d snapshots from /nexus/snapshots", len(snapshots))
 
-    # Surface the airline-code distribution so future filter mismatches
-    # are obvious from a single log line.
-    code_counts = Counter((s.get("airline_cde") or "?").upper() for s in snapshots)
-    log.info("airline code distribution: %s", dict(code_counts))
+    if snapshots:
+        log.info(
+            "sample flight_keys (first 3): %s",
+            [s.get("flight_key") for s in snapshots[:3]],
+        )
 
-    snapshots = [
-        s for s in snapshots
-        if (s.get("airline_cde") or "").upper() in airlines
-    ]
+    # Use the airline_cde -> flight_key fallback for every snapshot.
+    code_counts = Counter(snapshot_airline(s) or "?" for s in snapshots)
+    log.info("airline code distribution (with flight_key fallback): %s",
+             dict(code_counts))
+
+    snapshots = [s for s in snapshots if snapshot_airline(s) in airlines]
     log.info(
         "after airline filter (%s): %d snapshots",
         "/".join(airlines), len(snapshots),

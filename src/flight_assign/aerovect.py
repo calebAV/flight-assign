@@ -43,8 +43,6 @@ class AeroVectClient:
         self._timeout = timeout
         self._token: _CachedToken | None = None
 
-    # ---- auth -------------------------------------------------------------
-
     def _mint_token(self) -> _CachedToken:
         resp = self._session.post(
             AUTH0_URL,
@@ -59,7 +57,6 @@ class AeroVectClient:
         resp.raise_for_status()
         body = resp.json()
         access_token = body["access_token"]
-        # Auth0 returns expires_in seconds; tokens are 10h per docs.
         expires_in = int(body.get("expires_in", 36000))
         return _CachedToken(
             access_token=access_token,
@@ -70,8 +67,6 @@ class AeroVectClient:
         if self._token is None or time.time() >= self._token.expires_at_epoch:
             self._token = self._mint_token()
         return f"Bearer {self._token.access_token}"
-
-    # ---- endpoints --------------------------------------------------------
 
     def get_snapshots(
         self,
@@ -98,3 +93,32 @@ class AeroVectClient:
         )
         resp.raise_for_status()
         return resp.json().get("snapshots", [])
+
+
+def snapshot_airline(snap: dict) -> str:
+    """Recover the airline code from a snapshot, even when airline_cde is null.
+
+    Strategy:
+      1. Use airline_cde if it's a non-empty string.
+      2. Else parse it out of flight_key, which has the shape
+         "YYYY-MM-DD#AL#FLTNUM#ORIG#DEST" per the API docs. The 2nd `#`-
+         separated component is the airline code.
+      3. flight_keys that start with "PARTIAL" don't have the airline
+         in the expected slot — return empty string and let the caller
+         decide (typically: skip the flight).
+
+    Returns the uppercased airline code, or "" if unrecoverable.
+    """
+    code = (snap.get("airline_cde") or "").strip().upper()
+    if code:
+        return code
+
+    fk = (snap.get("flight_key") or "").strip()
+    if not fk or fk.startswith("PARTIAL"):
+        return ""
+
+    parts = fk.split("#")
+    # Expected shape: parts[0]=date, parts[1]=airline, parts[2]=fltnum, ...
+    if len(parts) >= 2 and parts[1]:
+        return parts[1].upper()
+    return ""
