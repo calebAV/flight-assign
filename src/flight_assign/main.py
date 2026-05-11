@@ -7,7 +7,7 @@ Required environment variables:
   SLACK_CHANNEL_ID            Channel to POST assignments to
                               (default: C0AQEA7NR28 = #flight-assign).
   SLACK_SCHEDULE_CHANNEL_ID   Channel to READ schedules from. Optional.
-                              If unset, defaults to SLACK_CHANNEL_ID.
+                              Defaults to SLACK_CHANNEL_ID.
   AIRPORT                     (default: ATL)
   AIRLINE                     (default: DL)
   HOURS_FORWARD               (default: 9)
@@ -24,7 +24,7 @@ import time
 
 from .aerovect import AeroVectClient
 from .assign import assign_flights, snapshot_to_flight
-from .format import format_message
+from .format import ScheduleSource, format_message
 from .gates import filter_snapshots
 from .roster import (
     current_week_monday,
@@ -49,12 +49,14 @@ def _truthy(v: str) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _resolve_schedule(slack: SlackClient, channel_id: str, max_scan: int) -> dict | None:
+def _resolve_schedule(
+    slack: SlackClient, channel_id: str, max_scan: int
+) -> tuple[dict | None, ScheduleSource | None]:
     """Find the newest valid WEEKLY_SCHEDULE_JSON in the channel.
 
-    Always picks the latest valid schedule, so mid-week re-posts win.
-    The parser already validates shape (weekOf + days), so random JSON
-    in chatter cannot impersonate a schedule.
+    Returns (schedule, source) where source carries the weekOf and a
+    clickable permalink to the source message in Slack — both surfaced in
+    the bot's post so operators can verify which roster was used.
     """
     def is_schedule(msg: dict) -> bool:
         return parse_schedule_message(msg.get("text") or "") is not None
@@ -62,30 +64,38 @@ def _resolve_schedule(slack: SlackClient, channel_id: str, max_scan: int) -> dic
     matched, scanned = slack.find_message(
         is_schedule, channel_id=channel_id, max_scan=max_scan
     )
+    expected_week = current_week_monday()
+
     if matched is None:
         log.error(
             "no WEEKLY_SCHEDULE_JSON found in channel %s after scanning %d "
             "messages. Re-post the schedule via the schedule-converter skill.",
             channel_id, scanned,
         )
-        return None
+        return None, None
 
     sched = parse_schedule_message(matched["text"])
-    expected_week = current_week_monday()
     actual_week = sched.get("weekOf") if sched else None
-    if actual_week == expected_week:
-        log.info(
-            "using schedule weekOf=%s (current week) — found after scanning "
-            "%d messages",
-            actual_week, scanned,
-        )
-    else:
+    ts = matched.get("ts") or ""
+    permalink = slack.permalink(channel_id, ts) if ts else None
+
+    log.info(
+        "using schedule weekOf=%s (expected %s), ts=%s, permalink=%s, "
+        "found after scanning %d messages",
+        actual_week, expected_week, ts, permalink, scanned,
+    )
+    if actual_week != expected_week:
         log.warning(
-            "using newest schedule weekOf=%s, but current week is %s. "
+            "schedule weekOf %s does not match current week %s. "
             "Re-post the schedule if this is stale.",
             actual_week, expected_week,
         )
-    return sched
+
+    return sched, ScheduleSource(
+        week_of=actual_week,
+        permalink=permalink,
+        expected_week=expected_week,
+    )
 
 
 def run() -> int:
@@ -125,14 +135,15 @@ def run() -> int:
 
     flights = [f for f in (snapshot_to_flight(s) for s in snapshots) if f is not None]
 
-    # 2) Read roster — always pick the newest valid schedule.
+    # 2) Read roster.
     slack = SlackClient(slack_token, post_channel)
-    schedule = _resolve_schedule(slack, schedule_channel, max_scan)
+    schedule, source = _resolve_schedule(slack, schedule_channel, max_scan)
     if schedule is None:
         return 2
 
     operators = operators_on_shift(schedule)
-    log.info("on-shift operators: %d", len(operators))
+    log.info("on-shift operators: %d (%s)",
+             len(operators), ", ".join(o.name for o in operators))
 
     # 3) Assign.
     now_ms = int(time.time() * 1000)
@@ -144,7 +155,7 @@ def run() -> int:
     )
 
     # 4) Post.
-    body = format_message(result, operators)
+    body = format_message(result, operators, schedule_source=source)
     if dry_run:
         print(body)
         return 0

@@ -15,9 +15,7 @@ log = logging.getLogger(__name__)
 
 
 class SlackClient:
-    """Wraps slack_sdk. The default `channel_id` is used by `post()`; pass
-    a `channel_id=` override to `find_message()` to read from a different
-    channel (e.g. a dedicated #flight-assign-schedule)."""
+    """Wraps slack_sdk."""
 
     def __init__(self, bot_token: str, channel_id: str):
         if not bot_token:
@@ -34,10 +32,7 @@ class SlackClient:
         channel_id: str | None = None,
         max_scan: int = DEFAULT_MAX_SCAN,
     ) -> tuple[dict | None, int]:
-        """Scan a channel newest-first, return (first match, n_scanned).
-
-        `channel_id` defaults to the client's default channel.
-        """
+        """Scan a channel newest-first, return (first match, n_scanned)."""
         target_channel = channel_id or self._channel_id
         cursor: str | None = None
         scanned = 0
@@ -65,6 +60,19 @@ class SlackClient:
                 break
 
         return None, scanned
+
+    def permalink(self, channel_id: str, ts: str) -> str | None:
+        """Return a clickable Slack permalink for a (channel, ts) pair.
+        Returns None on failure — caller should treat as soft failure."""
+        try:
+            resp = self._client.chat_getPermalink(channel=channel_id, message_ts=ts)
+        except SlackApiError as exc:
+            log.warning(
+                "Could not get permalink for %s/%s: %s",
+                channel_id, ts, exc.response.get("error"),
+            )
+            return None
+        return resp.get("permalink")
 
     def post(self, text: str, *, blocks: Iterable[dict] | None = None) -> str:
         """Post a message to the default channel; return the ts."""
