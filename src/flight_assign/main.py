@@ -7,9 +7,11 @@ Required environment variables:
   SLACK_CHANNEL_ID            Channel to POST assignments to
                               (default: C0AQEA7NR28 = #flight-assign).
   SLACK_SCHEDULE_CHANNEL_ID   Channel to READ schedules from. Optional.
-                              Defaults to SLACK_CHANNEL_ID.
+                              Falls back to SLACK_CHANNEL_ID when empty/unset.
   AIRPORT                     (default: ATL)
-  AIRLINE                     (default: DL)
+  AIRLINE                     Comma-separated airline codes to keep,
+                              case-insensitive. Default: "DL,DAL"
+                              (covers both Delta's IATA and ICAO codes).
   HOURS_FORWARD               (default: 9)
   SLACK_HISTORY_MAX_SCAN      (default: 2000)
   DRY_RUN                     ("1"/"true" to skip the Slack post)
@@ -21,6 +23,7 @@ import logging
 import os
 import sys
 import time
+from collections import Counter
 
 from .aerovect import AeroVectClient
 from .assign import assign_flights, snapshot_to_flight
@@ -39,7 +42,11 @@ log = logging.getLogger("flight_assign")
 
 
 def _env(name: str, default: str | None = None, *, required: bool = False) -> str:
-    val = os.environ.get(name, default)
+    """Read env var. Treats empty string the same as unset — so GitHub Actions
+    passing an unset secret as `""` still falls back to the default."""
+    val = os.environ.get(name)
+    if not val:  # None OR empty string
+        val = default
     if required and not val:
         raise SystemExit(f"Missing required env var: {name}")
     return val or ""
@@ -49,15 +56,15 @@ def _truthy(v: str) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _parse_airline_list(raw: str) -> list[str]:
+    """Split a comma-separated airline-codes string into a normalized list."""
+    return [a.strip().upper() for a in raw.split(",") if a.strip()]
+
+
 def _resolve_schedule(
     slack: SlackClient, channel_id: str, max_scan: int
 ) -> tuple[dict | None, ScheduleSource | None]:
-    """Find the newest valid WEEKLY_SCHEDULE_JSON in the channel.
-
-    Returns (schedule, source) where source carries the weekOf and a
-    clickable permalink to the source message in Slack — both surfaced in
-    the bot's post so operators can verify which roster was used.
-    """
+    """Find the newest valid WEEKLY_SCHEDULE_JSON in the channel."""
     def is_schedule(msg: dict) -> bool:
         return parse_schedule_message(msg.get("text") or "") is not None
 
@@ -110,7 +117,7 @@ def run() -> int:
     post_channel = _env("SLACK_CHANNEL_ID", default=DEFAULT_CHANNEL_ID)
     schedule_channel = _env("SLACK_SCHEDULE_CHANNEL_ID", default=post_channel)
     airport = _env("AIRPORT", default="ATL").upper()
-    airline = _env("AIRLINE", default="DL").upper()
+    airlines = _parse_airline_list(_env("AIRLINE", default="DL,DAL"))
     hours_forward = int(_env("HOURS_FORWARD", default="9"))
     max_scan = int(_env("SLACK_HISTORY_MAX_SCAN", default="2000"))
     dry_run = _truthy(_env("DRY_RUN", default=""))
@@ -128,8 +135,20 @@ def run() -> int:
     snapshots = av.get_snapshots(airport, hours_back=0, hours_forward=hours_forward)
     log.info("fetched %d snapshots from /nexus/snapshots", len(snapshots))
 
-    snapshots = [s for s in snapshots if (s.get("airline_cde") or "").upper() == airline]
-    log.info("after airline filter (%s): %d snapshots", airline, len(snapshots))
+    # Surface the airline-code distribution so future filter mismatches
+    # are obvious from a single log line.
+    code_counts = Counter((s.get("airline_cde") or "?").upper() for s in snapshots)
+    log.info("airline code distribution: %s", dict(code_counts))
+
+    snapshots = [
+        s for s in snapshots
+        if (s.get("airline_cde") or "").upper() in airlines
+    ]
+    log.info(
+        "after airline filter (%s): %d snapshots",
+        "/".join(airlines), len(snapshots),
+    )
+
     snapshots = filter_snapshots(snapshots)
     log.info("after gate filter (T + A1-A18): %d snapshots", len(snapshots))
 
@@ -142,8 +161,10 @@ def run() -> int:
         return 2
 
     operators = operators_on_shift(schedule)
-    log.info("on-shift operators: %d (%s)",
-             len(operators), ", ".join(o.name for o in operators))
+    log.info(
+        "on-shift operators: %d (%s)",
+        len(operators), ", ".join(o.name for o in operators),
+    )
 
     # 3) Assign.
     now_ms = int(time.time() * 1000)
