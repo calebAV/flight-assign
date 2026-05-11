@@ -63,3 +63,52 @@ def test_format_message_lists_unassigned():
     msg = format_message(res, ops, now_utc=now_utc)
     assert "Unassigned" in msg
     assert "DL101" in msg
+
+
+from flight_assign.format import FeedHealth
+
+
+def test_feed_health_all_partial_renders_warning():
+    """All 39 PARTIAL → loud warning, distinct from a normal 'no flights'."""
+    now_utc = datetime(2026, 5, 11, 14, 0, tzinfo=timezone.utc)
+    res = assign_flights([], [Operator("Sam", "Production")],
+                        now_ms=int(now_utc.timestamp() * 1000))
+    health = FeedHealth(total=39, partial=39)
+    msg = format_message(res, [Operator("Sam", "Production")],
+                         now_utc=now_utc, feed_health=health)
+    assert "Data feed degraded" in msg
+    assert "39" in msg
+    assert "PARTIAL" in msg
+    assert "Contact AeroVect support" in msg
+
+
+def test_feed_health_partial_majority_renders_note():
+    now_utc = datetime(2026, 5, 11, 14, 0, tzinfo=timezone.utc)
+    res = assign_flights([], [Operator("Sam", "Production")],
+                        now_ms=int(now_utc.timestamp() * 1000))
+    health = FeedHealth(total=20, partial=14)
+    msg = format_message(res, [Operator("Sam", "Production")],
+                         now_utc=now_utc, feed_health=health)
+    assert "14 of 20 flights are PARTIAL" in msg
+
+
+def test_feed_health_minor_partial_suppressed():
+    """A few PARTIAL is normal and shouldn't clutter the post."""
+    now_utc = datetime(2026, 5, 11, 14, 0, tzinfo=timezone.utc)
+    res = assign_flights([], [Operator("Sam", "Production")],
+                        now_ms=int(now_utc.timestamp() * 1000))
+    health = FeedHealth(total=40, partial=3)
+    msg = format_message(res, [Operator("Sam", "Production")],
+                         now_utc=now_utc, feed_health=health)
+    assert "PARTIAL" not in msg
+    assert "Data feed degraded" not in msg
+
+
+def test_feed_health_zero_total_suppressed():
+    now_utc = datetime(2026, 5, 11, 14, 0, tzinfo=timezone.utc)
+    res = assign_flights([], [Operator("Sam", "Production")],
+                        now_ms=int(now_utc.timestamp() * 1000))
+    health = FeedHealth(total=0, partial=0)
+    msg = format_message(res, [Operator("Sam", "Production")],
+                         now_utc=now_utc, feed_health=health)
+    assert "PARTIAL" not in msg

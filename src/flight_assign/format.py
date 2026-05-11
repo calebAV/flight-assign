@@ -1,8 +1,4 @@
-"""Format an AssignmentResult into a Slack message body.
-
-We emit a plain-text message so it remains greppable and copy/pasteable.
-Times are rendered in Atlanta local time.
-"""
+"""Format an AssignmentResult into a Slack message body."""
 
 from __future__ import annotations
 
@@ -18,11 +14,31 @@ ATLANTA_TZ = ZoneInfo("America/New_York")
 
 @dataclass(frozen=True)
 class ScheduleSource:
-    """Provenance for the schedule used in a cycle. Shown in the post header
-    so operators can verify the bot is reading the right roster."""
+    """Provenance for the schedule used in a cycle."""
     week_of: str | None
     permalink: str | None
-    expected_week: str | None  # current Atlanta-local Monday for comparison
+    expected_week: str | None
+
+
+@dataclass(frozen=True)
+class FeedHealth:
+    """Diagnostic snapshot of the AeroVect feed for this cycle.
+
+    `total` is the snapshot count from the API. `partial` is how many
+    came back with a PARTIAL flight_key (Delta hasn't sent augmented
+    columns yet). When partial == total, we can't filter by gate or
+    airline because those fields don't exist.
+    """
+    total: int
+    partial: int
+
+    @property
+    def all_partial(self) -> bool:
+        return self.total > 0 and self.partial == self.total
+
+    @property
+    def partial_ratio(self) -> float:
+        return self.partial / self.total if self.total else 0.0
 
 
 def _fmt_time(epoch_ms: int) -> str:
@@ -45,7 +61,6 @@ def _flight_line(a: Assignment) -> str:
 
 
 def _source_line(src: ScheduleSource | None) -> str | None:
-    """Return a small italic note showing which schedule was used."""
     if src is None:
         return None
     bits: list[str] = []
@@ -59,12 +74,30 @@ def _source_line(src: ScheduleSource | None) -> str | None:
     return f"_Schedule: {label}_"
 
 
+def _feed_health_line(health: FeedHealth | None) -> str | None:
+    if health is None or health.total == 0:
+        return None
+    if health.all_partial:
+        return (
+            f":warning: *Data feed degraded* — all {health.total} flights "
+            f"in window are PARTIAL (Delta hasn't sent gate/airline columns "
+            f"yet). No assignments possible. Contact AeroVect support."
+        )
+    if health.partial_ratio >= 0.5:
+        return (
+            f":warning: {health.partial} of {health.total} flights are PARTIAL "
+            f"({int(round(health.partial_ratio*100))}%) — assignments limited."
+        )
+    return None
+
+
 def format_message(
     result: AssignmentResult,
     operators_on_shift: list[Operator],
     *,
     now_utc: datetime | None = None,
     schedule_source: ScheduleSource | None = None,
+    feed_health: FeedHealth | None = None,
 ) -> str:
     """Build the Slack message body for this cycle."""
     now_utc = now_utc or datetime.now(timezone.utc)
@@ -79,6 +112,9 @@ def format_message(
     src = _source_line(schedule_source)
     if src:
         lines.append(src)
+    health = _feed_health_line(feed_health)
+    if health:
+        lines.append(health)
     lines.append("")
 
     by_op = result.by_operator()

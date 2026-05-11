@@ -27,7 +27,7 @@ from collections import Counter
 
 from .aerovect import AeroVectClient, snapshot_airline
 from .assign import assign_flights, snapshot_to_flight
-from .format import ScheduleSource, format_message
+from .format import FeedHealth, ScheduleSource, format_message
 from .gates import filter_snapshots
 from .roster import (
     current_week_monday,
@@ -128,7 +128,8 @@ def run() -> int:
     # 1) Pull flights.
     av = AeroVectClient(client_id, client_secret)
     snapshots = av.get_snapshots(airport, hours_back=0, hours_forward=hours_forward)
-    log.info("fetched %d snapshots from /nexus/snapshots", len(snapshots))
+    total_snapshots = len(snapshots)
+    log.info("fetched %d snapshots from /nexus/snapshots", total_snapshots)
 
     if snapshots:
         log.info(
@@ -136,7 +137,21 @@ def run() -> int:
             [s.get("flight_key") for s in snapshots[:3]],
         )
 
-    # Use the airline_cde -> flight_key fallback for every snapshot.
+    # Count PARTIAL flight_keys — those are the data-feed-degraded ones.
+    partial_count = sum(
+        1 for s in snapshots
+        if (s.get("flight_key") or "").startswith("PARTIAL")
+    )
+    feed_health = FeedHealth(total=total_snapshots, partial=partial_count)
+    if partial_count:
+        log.warning(
+            "%d of %d snapshots are PARTIAL — Delta has not sent augmented "
+            "columns (airline_cde / gate / pier). Affected flights cannot be "
+            "assigned. Contact AeroVect support if this persists.",
+            partial_count, total_snapshots,
+        )
+
+    # Airline distribution (PARTIAL keys will show up as "?")
     code_counts = Counter(snapshot_airline(s) or "?" for s in snapshots)
     log.info("airline code distribution (with flight_key fallback): %s",
              dict(code_counts))
@@ -174,7 +189,7 @@ def run() -> int:
     )
 
     # 4) Post.
-    body = format_message(result, operators, schedule_source=source)
+    body = format_message(result, operators, schedule_source=source, feed_health=feed_health)
     if dry_run:
         print(body)
         return 0
