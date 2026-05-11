@@ -27,6 +27,7 @@ from collections import Counter
 
 from .aerovect import AeroVectClient, snapshot_airline
 from .assign import assign_flights, snapshot_to_flight
+from .changes import DEFAULT_LOOKBACK_MINUTES, detect_changes
 from .format import FeedHealth, ScheduleSource, format_message
 from .gates import filter_snapshots as filter_by_gate
 from .piers import MAX_PIER, MIN_PIER, filter_snapshots as filter_by_pier
@@ -116,6 +117,7 @@ def run() -> int:
     airlines = _parse_airline_list(_env("AIRLINE", default="DL,DAL"))
     hours_forward = int(_env("HOURS_FORWARD", default="9"))
     max_scan = int(_env("SLACK_HISTORY_MAX_SCAN", default="2000"))
+    change_lookback_min = int(_env("CHANGE_LOOKBACK_MINUTES", default=str(DEFAULT_LOOKBACK_MINUTES)))
     dry_run = _truthy(_env("DRY_RUN", default=""))
 
     if schedule_channel != post_channel:
@@ -195,7 +197,26 @@ def run() -> int:
     )
 
     # 4) Post.
-    body = format_message(result, operators, schedule_source=source, feed_health=feed_health)
+    # 3a) Detect per-flight changes within the lookback window.
+    change_map: dict[str, list[str]] = {}
+    for a in result.assigned:
+        ch = detect_changes(
+            a.flight.field_updated_at,
+            now_ms,
+            lookback_minutes=change_lookback_min,
+        )
+        if ch:
+            change_map[a.flight.flight_key] = ch
+    if change_map:
+        log.info("flights with recent changes (last %d min): %d",
+                 change_lookback_min, len(change_map))
+
+    body = format_message(
+        result, operators,
+        schedule_source=source,
+        feed_health=feed_health,
+        change_map=change_map,
+    )
     if dry_run:
         print(body)
         return 0

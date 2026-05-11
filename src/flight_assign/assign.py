@@ -24,8 +24,16 @@ MIN_GAP_MINUTES = 12
 MS_PER_MIN = 60_000
 
 
-@dataclass(frozen=True)
+@dataclass
 class Flight:
+    """Single flight ready for assignment.
+
+    `field_updated_at` is the raw dict from the API snapshot — each key
+    (e.g. 'dptr_gate', 'dptr_bag_pier_num', 'est_out') maps to the
+    epoch-ms timestamp of the last update for that field. The changes
+    module reads from here to decide whether to surface a gate/pier/
+    time change in the Slack post.
+    """
     flight_key: str
     flt_num: str
     airline: str
@@ -34,6 +42,7 @@ class Flight:
     pier: str
     departure_ms: int  # mission_time_ms
     time_type: str  # "A", "E", or "S"
+    field_updated_at: dict = field(default_factory=dict)
 
     @property
     def haulout_ms(self) -> int:
@@ -83,6 +92,7 @@ def snapshot_to_flight(snap: dict) -> Flight | None:
         pier=snapshot_pier(snap),
         departure_ms=int(departure_ms),
         time_type=str(snap.get("time_type") or "S"),
+        field_updated_at=dict(snap.get("field_updated_at") or {}),
     )
 
 

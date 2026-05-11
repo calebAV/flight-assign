@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from .assign import Assignment, AssignmentResult, Flight
+from .changes import changes_summary
 from .roster import Operator
 
 ATLANTA_TZ = ZoneInfo("America/New_York")
@@ -50,13 +51,19 @@ def _time_type_tag(t: str) -> str:
     return {"A": "actual", "E": "est", "S": "sked"}.get(t, "sked")
 
 
-def _flight_line(a: Assignment) -> str:
+def _flight_line(a: Assignment, changes: list[str] | None = None) -> str:
     f: Flight = a.flight
+    bullet = "  • "
+    suffix = ""
+    if changes:
+        bullet = "  • :warning: "
+        suffix = f"  _{changes_summary(changes)}_"
     return (
-        f"  • {_fmt_time(f.haulout_ms)} haulout → "
+        f"{bullet}{_fmt_time(f.haulout_ms)} haulout → "
         f"{_fmt_time(f.departure_ms)} dep ({_time_type_tag(f.time_type)})  "
         f"{f.airline}{f.flt_num} → {f.dest}  "
         f"pier {f.pier or '?'} / gate {f.gate or '?'}"
+        f"{suffix}"
     )
 
 
@@ -99,7 +106,11 @@ def format_message(
     now_utc: datetime | None = None,
     schedule_source: ScheduleSource | None = None,
     feed_health: FeedHealth | None = None,
+    change_map: dict[str, list[str]] | None = None,
 ) -> str:
+    """`change_map` is flight_key -> list of changed categories
+    (e.g. {"k-1234": ["gate"]}). Lines for flights with non-empty
+    entries get a :warning: prefix and a parenthetical."""
     """Build the Slack message body for this cycle."""
     now_utc = now_utc or datetime.now(timezone.utc)
     header_time = now_utc.astimezone(ATLANTA_TZ).strftime("%a %b %d, %H:%M ET")
@@ -133,7 +144,8 @@ def format_message(
             lines.append(f"*{op.name}*{role_tag}  — {len(assignments)} flight"
                          f"{'s' if len(assignments) != 1 else ''}")
             for a in assignments:
-                lines.append(_flight_line(a))
+                ch = (change_map or {}).get(a.flight.flight_key) or []
+                lines.append(_flight_line(a, ch))
         lines.append("")
 
     if result.unassigned:
