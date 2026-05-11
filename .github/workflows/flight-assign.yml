@@ -41,5 +41,5 @@ jobs:
           # AIRLINE intentionally not set — code defaults to "DL,DAL"
           # (Delta IATA + ICAO). Set this secret/var if you need to
           # restrict further or run a different carrier.
-          HOURS_FORWARD: "9"
+          HOURS_FORWARD: "2"
         run: flight-assign
