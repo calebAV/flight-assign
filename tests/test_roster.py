@@ -200,3 +200,44 @@ def test_current_week_monday_sunday_evening_atl():
     # Sunday 2026-05-10 20:00 ET (UTC 00:00 Mon)
     t = datetime(2026, 5, 11, 0, 0, tzinfo=timezone.utc)
     assert current_week_monday(t) == "2026-05-04"
+
+
+def test_parse_schedule_message_with_smart_quotes():
+    """Slack/macOS auto-curlify quotes — parser must tolerate them."""
+    msg = (
+        "WEEKLY_SCHEDULE_JSON\n"
+        '{“weekOf”: “2026-05-11”, “days”: {“monday”: {“shift1”: '
+        '[{“name”: “Andrew Christiansen”, “role”: “Production”}], '
+        '“shift2”: []}}}'
+    )
+    sched = parse_schedule_message(msg)
+    assert sched is not None
+    assert sched["weekOf"] == "2026-05-11"
+    assert sched["days"]["monday"]["shift1"][0]["name"] == "Andrew Christiansen"
+
+
+def test_parse_schedule_message_rejects_wrong_shape():
+    """JSON that doesn't have weekOf + days should not be treated as a schedule."""
+    msg = 'Talking about WEEKLY_SCHEDULE_JSON: {"foo": "bar", "baz": 42}'
+    assert parse_schedule_message(msg) is None
+
+
+def test_parse_schedule_message_rejects_missing_days():
+    msg = 'WEEKLY_SCHEDULE_JSON\n{"weekOf": "2026-05-11"}'
+    assert parse_schedule_message(msg) is None
+
+
+def test_parse_schedule_message_rejects_missing_weekof():
+    msg = 'WEEKLY_SCHEDULE_JSON\n{"days": {}}'
+    assert parse_schedule_message(msg) is None
+
+
+def test_parse_schedule_message_mixed_quotes():
+    """Some keys curly, some straight — common when partially edited in Slack."""
+    msg = (
+        "WEEKLY_SCHEDULE_JSON\n"
+        '{"weekOf": “2026-05-11”, "days": {}}'
+    )
+    sched = parse_schedule_message(msg)
+    assert sched is not None
+    assert sched["weekOf"] == "2026-05-11"

@@ -7,8 +7,7 @@ Required environment variables:
   SLACK_CHANNEL_ID            Channel to POST assignments to
                               (default: C0AQEA7NR28 = #flight-assign).
   SLACK_SCHEDULE_CHANNEL_ID   Channel to READ schedules from. Optional.
-                              If unset, defaults to SLACK_CHANNEL_ID
-                              (single-channel mode, backward compatible).
+                              If unset, defaults to SLACK_CHANNEL_ID.
   AIRPORT                     (default: ATL)
   AIRLINE                     (default: DL)
   HOURS_FORWARD               (default: 9)
@@ -51,42 +50,17 @@ def _truthy(v: str) -> bool:
 
 
 def _resolve_schedule(slack: SlackClient, channel_id: str, max_scan: int) -> dict | None:
-    """Find the right WEEKLY_SCHEDULE_JSON in the channel.
+    """Find the newest valid WEEKLY_SCHEDULE_JSON in the channel.
 
-    Two-phase: prefer the schedule whose weekOf matches the current
-    Atlanta-local Monday; fall back to the newest valid schedule
-    if no exact week match exists.
+    Always picks the latest valid schedule, so mid-week re-posts win.
+    The parser already validates shape (weekOf + days), so random JSON
+    in chatter cannot impersonate a schedule.
     """
-    target_week = current_week_monday()
-
-    # Phase 1: exact weekOf match (newest if multiple).
-    def is_current_week(msg: dict) -> bool:
-        sched = parse_schedule_message(msg.get("text") or "")
-        return bool(sched and sched.get("weekOf") == target_week)
-
-    matched, scanned = slack.find_message(
-        is_current_week, channel_id=channel_id, max_scan=max_scan
-    )
-    if matched is not None:
-        log.info(
-            "found WEEKLY_SCHEDULE_JSON for current week (weekOf=%s) after "
-            "scanning %d messages",
-            target_week, scanned,
-        )
-        return parse_schedule_message(matched["text"])
-
-    log.warning(
-        "no schedule with weekOf=%s in last %d messages; falling back to "
-        "newest valid schedule",
-        target_week, scanned,
-    )
-
-    # Phase 2: any valid schedule (newest first).
-    def is_any_valid(msg: dict) -> bool:
+    def is_schedule(msg: dict) -> bool:
         return parse_schedule_message(msg.get("text") or "") is not None
 
     matched, scanned = slack.find_message(
-        is_any_valid, channel_id=channel_id, max_scan=max_scan
+        is_schedule, channel_id=channel_id, max_scan=max_scan
     )
     if matched is None:
         log.error(
@@ -97,10 +71,20 @@ def _resolve_schedule(slack: SlackClient, channel_id: str, max_scan: int) -> dic
         return None
 
     sched = parse_schedule_message(matched["text"])
-    log.warning(
-        "using stale schedule (weekOf=%s) — re-post the current week's schedule.",
-        sched.get("weekOf") if sched else "?",
-    )
+    expected_week = current_week_monday()
+    actual_week = sched.get("weekOf") if sched else None
+    if actual_week == expected_week:
+        log.info(
+            "using schedule weekOf=%s (current week) — found after scanning "
+            "%d messages",
+            actual_week, scanned,
+        )
+    else:
+        log.warning(
+            "using newest schedule weekOf=%s, but current week is %s. "
+            "Re-post the schedule if this is stale.",
+            actual_week, expected_week,
+        )
     return sched
 
 
@@ -141,7 +125,7 @@ def run() -> int:
 
     flights = [f for f in (snapshot_to_flight(s) for s in snapshots) if f is not None]
 
-    # 2) Read roster — prefer current week, fall back to newest valid.
+    # 2) Read roster — always pick the newest valid schedule.
     slack = SlackClient(slack_token, post_channel)
     schedule = _resolve_schedule(slack, schedule_channel, max_scan)
     if schedule is None:

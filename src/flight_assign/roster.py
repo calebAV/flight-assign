@@ -48,6 +48,21 @@ _WEEKDAY_NAMES = [
 # Marker required at the top of a schedule message.
 _HEADER_RE = re.compile(r"WEEKLY_SCHEDULE_JSON", re.IGNORECASE)
 
+# Slack and macOS auto-curlify straight quotes in some clients. Normalize
+# them to straight quotes before handing to json.loads.
+_SMART_QUOTE_MAP = str.maketrans({
+    "“": '"',  # left double curly  "
+    "”": '"',  # right double curly "
+    "„": '"',  # double low-9       „
+    "‟": '"',  # double high-reversed
+    "‘": "'",  # left single curly  '
+    "’": "'",  # right single curly '
+    "‚": "'",  # single low-9
+    "‛": "'",  # single high-reversed
+    "«": '"',  # left guillemet  «
+    "»": '"',  # right guillemet »
+})
+
 log = logging.getLogger(__name__)
 
 
@@ -74,9 +89,21 @@ def current_weekday_key(now_utc: datetime | None = None) -> str:
     return _WEEKDAY_NAMES[now_utc.astimezone(ATLANTA_TZ).weekday()]
 
 
+def current_week_monday(now_utc: datetime | None = None) -> str:
+    """Return YYYY-MM-DD for the Monday of the current Atlanta-local week.
+
+    Kept around as a utility even though the schedule resolver no longer
+    filters by it — useful for logging which week is "expected."
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    local = now_utc.astimezone(ATLANTA_TZ).date()
+    monday = local - _td(days=local.weekday())
+    return monday.strftime("%Y-%m-%d")
+
+
 def _first_balanced_json_object(text: str, start: int) -> dict | None:
     """Walk `text` starting at index `start`, find the next `{...}` with
-    balanced braces (respecting JSON strings), and return the parsed object.
+    balanced braces (respecting JSON strings), return the parsed object.
     Returns None on no match or parse failure.
     """
     open_idx = text.find("{", start)
@@ -109,36 +136,54 @@ def _first_balanced_json_object(text: str, start: int) -> dict | None:
     return None
 
 
+def _is_schedule_shape(obj) -> bool:
+    """Validate that a parsed object looks like a schedule.
+
+    A real schedule has `weekOf` (string) and `days` (object). Without this
+    check, the tolerant parser would happily match any JSON object that
+    happens to follow a 'WEEKLY_SCHEDULE_JSON' mention in chat.
+    """
+    return (
+        isinstance(obj, dict)
+        and isinstance(obj.get("weekOf"), str)
+        and isinstance(obj.get("days"), dict)
+    )
+
+
 def parse_schedule_message(text: str) -> dict | None:
     """Extract WEEKLY_SCHEDULE_JSON from a Slack message body.
 
-    Tolerant of formatting: works whether the JSON is wrapped in triple
-    backticks, a ```json fence, or nothing at all. Strategy: locate the
-    header, then extract the next balanced JSON object after it.
+    Tolerant of formatting (with or without triple backticks, json fence,
+    Unicode smart quotes). Requires the parsed object to look like a real
+    schedule (weekOf + days) — random JSON in chatter does not match.
     """
     if not text:
         return None
     header = _HEADER_RE.search(text)
     if not header:
         return None
-    obj = _first_balanced_json_object(text, header.end())
+    # Normalize curly quotes before parsing.
+    body = text[header.end():].translate(_SMART_QUOTE_MAP)
+    obj = _first_balanced_json_object(body, 0)
     if obj is None:
-        # Header present but JSON unparseable — likely a stale or broken paste.
         log.warning(
             "Found WEEKLY_SCHEDULE_JSON header but could not parse a JSON "
             "object after it. Message preview: %r",
             text[: min(200, len(text))],
         )
         return None
+    if not _is_schedule_shape(obj):
+        log.warning(
+            "Parsed JSON after WEEKLY_SCHEDULE_JSON header but it's not a "
+            "valid schedule shape (need weekOf + days). Keys: %r",
+            sorted(obj.keys()) if isinstance(obj, dict) else type(obj).__name__,
+        )
+        return None
     return obj
 
 
 def find_latest_schedule(messages: Iterable[dict]) -> dict | None:
-    """Given Slack messages (newest first), return the first parsed schedule.
-
-    Each message is expected to be a dict with a 'text' field; that matches the
-    shape `conversations.history` returns.
-    """
+    """Given Slack messages (newest first), return the first parsed schedule."""
     for msg in messages:
         text = msg.get("text") or ""
         sched = parse_schedule_message(text)
@@ -166,18 +211,3 @@ def operators_on_shift(
             continue
         out.append(Operator(name=name, role=role))
     return out
-
-
-def current_week_monday(now_utc: datetime | None = None) -> str:
-    """Return YYYY-MM-DD for the Monday of the current Atlanta-local week.
-
-    If today is Monday, returns today's date. Otherwise returns the most
-    recent past Monday (the start of the workweek we're currently in).
-    Used to disambiguate which WEEKLY_SCHEDULE_JSON to pick when the
-    channel has multiple historical schedules.
-    """
-    now_utc = now_utc or datetime.now(timezone.utc)
-    local = now_utc.astimezone(ATLANTA_TZ).date()
-    # weekday(): Monday=0 .. Sunday=6 — subtract weekday to land on Monday
-    monday = local - _td(days=local.weekday())
-    return monday.strftime("%Y-%m-%d")
