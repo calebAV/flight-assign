@@ -134,17 +134,19 @@ def snapshot_gate(snap: dict) -> str:
 
 
 def snapshot_pier(snap: dict) -> str:
-    """Return the pier letter from a snapshot, with field-name fallbacks.
+    """Return the bag/cart staging pier number from a snapshot.
 
-    The API doc says `pier` exists; production data doesn't have it as a
-    letter (there is a `dptr_bag_pier_num` but that's a numeric ramp ID).
-    Fall back to deriving the pier from the gate's leading letter:
-    "A30" -> "A", "T05" -> "T".
+    The API doc described `pier` as the concourse letter, but ops needs
+    the numeric pier (where bag tugs stage), which the production data
+    exposes as `dptr_bag_pier_num`. The concourse letter is already
+    conveyed by the gate string (e.g. "A14" / "T05"), so the slack post
+    isn't losing information by switching pier to numeric.
+
+    Preference order:
+      1. dptr_bag_pier_num (the actual operator-facing pier number)
+      2. pier (kept as a legacy fallback; not seen in production yet)
     """
-    pier = str(snap.get("pier") or "").strip().upper()
-    if pier:
-        return pier
-    gate = snapshot_gate(snap)
-    if gate and gate[0].isalpha():
-        return gate[0]
-    return ""
+    pier_num = str(snap.get("dptr_bag_pier_num") or "").strip()
+    if pier_num:
+        return pier_num
+    return str(snap.get("pier") or "").strip().upper()

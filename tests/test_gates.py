@@ -33,9 +33,8 @@ from flight_assign.gates import filter_snapshots, is_target_gate
         ("", "A", False),
         ("???", "A", False),
         ("A", "A", False),
-        # No gate, T pier → include (best-effort)
-        (None, "T", True),
-        # No gate, A pier → reject (could be A-North)
+        # No gate → always reject (pier is no longer a concourse letter)
+        (None, "T", False),
         (None, "A", False),
         ("", "", False),
     ],

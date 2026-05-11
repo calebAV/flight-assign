@@ -88,23 +88,28 @@ def test_snapshot_gate_empty_when_neither():
     assert snapshot_gate({"gate": "", "dptr_gate": ""}) == ""
 
 
-# --- snapshot_pier ---
+# --- snapshot_pier (numeric bag pier) ---
 
 
-def test_snapshot_pier_prefers_documented_field():
-    assert snapshot_pier({"pier": "T", "dptr_gate": "A14"}) == "T"
+def test_snapshot_pier_returns_dptr_bag_pier_num():
+    """The operator-facing pier is the numeric staging pier."""
+    assert snapshot_pier({"dptr_bag_pier_num": "75", "dptr_gate": "A14"}) == "75"
 
 
-def test_snapshot_pier_derived_from_gate_letter():
-    assert snapshot_pier({"dptr_gate": "A14"}) == "A"
-    assert snapshot_pier({"dptr_gate": "T05"}) == "T"
+def test_snapshot_pier_handles_integer_value():
+    """API may return as int instead of string."""
+    assert snapshot_pier({"dptr_bag_pier_num": 54}) == "54"
 
 
-def test_snapshot_pier_handles_lowercase_gate():
-    assert snapshot_pier({"dptr_gate": "a14"}) == "A"
+def test_snapshot_pier_falls_back_to_legacy_pier_field():
+    """If dptr_bag_pier_num is missing but `pier` is set, use that."""
+    assert snapshot_pier({"pier": "A", "dptr_gate": "A14"}) == "A"
 
 
-def test_snapshot_pier_empty_when_no_data():
+def test_snapshot_pier_empty_when_no_pier_data():
+    """Old behavior derived from gate letter; new behavior returns empty.
+    Operators get pier info from dptr_bag_pier_num or not at all."""
+    assert snapshot_pier({"dptr_gate": "A14"}) == ""
     assert snapshot_pier({}) == ""
 
 
@@ -125,4 +130,5 @@ def test_real_world_partial_snapshot_with_dptr_gate_kept_by_filter():
     assert filter_snapshots([snap]) == [snap]
     assert snapshot_airline(snap, default="DL") == "DL"
     assert snapshot_gate(snap) == "A05"
-    assert snapshot_pier(snap) == "A"
+    # pier comes from dptr_bag_pier_num; this snap has none → empty
+    assert snapshot_pier(snap) == ""
