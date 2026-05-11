@@ -9,7 +9,6 @@ Required environment variables:
   SLACK_SCHEDULE_CHANNEL_ID   Channel to READ schedules from. Optional.
                               If unset, defaults to SLACK_CHANNEL_ID
                               (single-channel mode, backward compatible).
-                              Set this to your #flight-assign-schedule channel.
   AIRPORT                     (default: ATL)
   AIRLINE                     (default: DL)
   HOURS_FORWARD               (default: 9)
@@ -28,7 +27,11 @@ from .aerovect import AeroVectClient
 from .assign import assign_flights, snapshot_to_flight
 from .format import format_message
 from .gates import filter_snapshots
-from .roster import operators_on_shift, parse_schedule_message
+from .roster import (
+    current_week_monday,
+    operators_on_shift,
+    parse_schedule_message,
+)
 from .slack_io import SlackClient
 
 DEFAULT_CHANNEL_ID = "C0AQEA7NR28"  # #flight-assign
@@ -45,6 +48,60 @@ def _env(name: str, default: str | None = None, *, required: bool = False) -> st
 
 def _truthy(v: str) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_schedule(slack: SlackClient, channel_id: str, max_scan: int) -> dict | None:
+    """Find the right WEEKLY_SCHEDULE_JSON in the channel.
+
+    Two-phase: prefer the schedule whose weekOf matches the current
+    Atlanta-local Monday; fall back to the newest valid schedule
+    if no exact week match exists.
+    """
+    target_week = current_week_monday()
+
+    # Phase 1: exact weekOf match (newest if multiple).
+    def is_current_week(msg: dict) -> bool:
+        sched = parse_schedule_message(msg.get("text") or "")
+        return bool(sched and sched.get("weekOf") == target_week)
+
+    matched, scanned = slack.find_message(
+        is_current_week, channel_id=channel_id, max_scan=max_scan
+    )
+    if matched is not None:
+        log.info(
+            "found WEEKLY_SCHEDULE_JSON for current week (weekOf=%s) after "
+            "scanning %d messages",
+            target_week, scanned,
+        )
+        return parse_schedule_message(matched["text"])
+
+    log.warning(
+        "no schedule with weekOf=%s in last %d messages; falling back to "
+        "newest valid schedule",
+        target_week, scanned,
+    )
+
+    # Phase 2: any valid schedule (newest first).
+    def is_any_valid(msg: dict) -> bool:
+        return parse_schedule_message(msg.get("text") or "") is not None
+
+    matched, scanned = slack.find_message(
+        is_any_valid, channel_id=channel_id, max_scan=max_scan
+    )
+    if matched is None:
+        log.error(
+            "no WEEKLY_SCHEDULE_JSON found in channel %s after scanning %d "
+            "messages. Re-post the schedule via the schedule-converter skill.",
+            channel_id, scanned,
+        )
+        return None
+
+    sched = parse_schedule_message(matched["text"])
+    log.warning(
+        "using stale schedule (weekOf=%s) — re-post the current week's schedule.",
+        sched.get("weekOf") if sched else "?",
+    )
+    return sched
 
 
 def run() -> int:
@@ -77,7 +134,6 @@ def run() -> int:
     snapshots = av.get_snapshots(airport, hours_back=0, hours_forward=hours_forward)
     log.info("fetched %d snapshots from /nexus/snapshots", len(snapshots))
 
-    # Filter: airline + target gates.
     snapshots = [s for s in snapshots if (s.get("airline_cde") or "").upper() == airline]
     log.info("after airline filter (%s): %d snapshots", airline, len(snapshots))
     snapshots = filter_snapshots(snapshots)
@@ -85,22 +141,11 @@ def run() -> int:
 
     flights = [f for f in (snapshot_to_flight(s) for s in snapshots) if f is not None]
 
-    # 2) Read roster — paginate Slack history until we find the schedule.
+    # 2) Read roster — prefer current week, fall back to newest valid.
     slack = SlackClient(slack_token, post_channel)
-    matched_msg, scanned = slack.find_message(
-        lambda m: parse_schedule_message(m.get("text") or "") is not None,
-        channel_id=schedule_channel,
-        max_scan=max_scan,
-    )
-    if matched_msg is None:
-        log.error(
-            "no WEEKLY_SCHEDULE_JSON found in channel %s after scanning %d "
-            "messages. Re-post the schedule via the schedule-converter skill.",
-            schedule_channel, scanned,
-        )
+    schedule = _resolve_schedule(slack, schedule_channel, max_scan)
+    if schedule is None:
         return 2
-    schedule = parse_schedule_message(matched_msg["text"])
-    log.info("found WEEKLY_SCHEDULE_JSON after scanning %d messages", scanned)
 
     operators = operators_on_shift(schedule)
     log.info("on-shift operators: %d", len(operators))

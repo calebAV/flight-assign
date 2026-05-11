@@ -24,7 +24,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta as _td, timezone
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -166,3 +166,18 @@ def operators_on_shift(
             continue
         out.append(Operator(name=name, role=role))
     return out
+
+
+def current_week_monday(now_utc: datetime | None = None) -> str:
+    """Return YYYY-MM-DD for the Monday of the current Atlanta-local week.
+
+    If today is Monday, returns today's date. Otherwise returns the most
+    recent past Monday (the start of the workweek we're currently in).
+    Used to disambiguate which WEEKLY_SCHEDULE_JSON to pick when the
+    channel has multiple historical schedules.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    local = now_utc.astimezone(ATLANTA_TZ).date()
+    # weekday(): Monday=0 .. Sunday=6 — subtract weekday to land on Monday
+    monday = local - _td(days=local.weekday())
+    return monday.strftime("%Y-%m-%d")

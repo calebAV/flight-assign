@@ -173,3 +173,30 @@ def test_parse_schedule_message_braces_in_strings_ignored():
     sched = parse_schedule_message(msg)
     assert sched is not None
     assert sched["note"] == "see }} below"
+
+
+from flight_assign.roster import current_week_monday
+
+
+def test_current_week_monday_on_monday():
+    # Monday 2026-05-11 10:00 ET → 14:00 UTC
+    t = datetime(2026, 5, 11, 14, 0, tzinfo=timezone.utc)
+    assert current_week_monday(t) == "2026-05-11"
+
+
+def test_current_week_monday_on_friday():
+    # Friday 2026-05-15 18:00 UTC → 14:00 ET Friday → Monday of that week is 05-11
+    t = datetime(2026, 5, 15, 18, 0, tzinfo=timezone.utc)
+    assert current_week_monday(t) == "2026-05-11"
+
+
+def test_current_week_monday_uses_atlanta_time():
+    # 02:00 UTC Monday = 22:00 ET Sunday — should return previous Monday
+    t = datetime(2026, 5, 11, 2, 0, tzinfo=timezone.utc)
+    assert current_week_monday(t) == "2026-05-04"
+
+
+def test_current_week_monday_sunday_evening_atl():
+    # Sunday 2026-05-10 20:00 ET (UTC 00:00 Mon)
+    t = datetime(2026, 5, 11, 0, 0, tzinfo=timezone.utc)
+    assert current_week_monday(t) == "2026-05-04"
