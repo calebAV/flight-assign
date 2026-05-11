@@ -28,7 +28,8 @@ from collections import Counter
 from .aerovect import AeroVectClient, snapshot_airline
 from .assign import assign_flights, snapshot_to_flight
 from .format import FeedHealth, ScheduleSource, format_message
-from .gates import filter_snapshots
+from .gates import filter_snapshots as filter_by_gate
+from .piers import MAX_PIER, MIN_PIER, filter_snapshots as filter_by_pier
 from .roster import (
     current_week_monday,
     operators_on_shift,
@@ -161,8 +162,14 @@ def run() -> int:
         "/".join(airlines), len(snapshots),
     )
 
-    snapshots = filter_snapshots(snapshots)
+    snapshots = filter_by_gate(snapshots)
     log.info("after gate filter (T + A1-A18): %d snapshots", len(snapshots))
+
+    snapshots = filter_by_pier(snapshots)
+    log.info(
+        "after pier filter (%d-%d): %d snapshots",
+        MIN_PIER, MAX_PIER, len(snapshots),
+    )
 
     flights = [f for f in (snapshot_to_flight(s) for s in snapshots) if f is not None]
 
