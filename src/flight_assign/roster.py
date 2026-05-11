@@ -15,7 +15,6 @@ The schedule format is owned by the schedule-converter skill:
 Shift hours (Atlanta local / ET):
   shift1 = 05:30 -> 14:00
   shift2 = 14:00 -> 22:00
-Outside those windows we return no operators (cron will skip posting).
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta as _td, timezone
-from typing import Iterable
+from typing import Iterable, Iterator
 from zoneinfo import ZoneInfo
 
 ATLANTA_TZ = ZoneInfo("America/New_York")
@@ -44,23 +43,17 @@ _WEEKDAY_NAMES = [
     "saturday",
     "sunday",
 ]
+_WEEKDAY_SET = set(_WEEKDAY_NAMES)
 
-# Marker required at the top of a schedule message.
 _HEADER_RE = re.compile(r"WEEKLY_SCHEDULE_JSON", re.IGNORECASE)
 
-# Slack and macOS auto-curlify straight quotes in some clients. Normalize
-# them to straight quotes before handing to json.loads.
+# Slack/macOS auto-curlify quotes in some clients. Normalize to straight
+# before json.loads, including the case where ONLY ONE side got curlified
+# (left curly + straight right, or vice versa).
 _SMART_QUOTE_MAP = str.maketrans({
-    "“": '"',  # left double curly  "
-    "”": '"',  # right double curly "
-    "„": '"',  # double low-9       „
-    "‟": '"',  # double high-reversed
-    "‘": "'",  # left single curly  '
-    "’": "'",  # right single curly '
-    "‚": "'",  # single low-9
-    "‛": "'",  # single high-reversed
-    "«": '"',  # left guillemet  «
-    "»": '"',  # right guillemet »
+    "“": '"', "”": '"', "„": '"', "‟": '"',
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+    "«": '"', "»": '"',
 })
 
 log = logging.getLogger(__name__)
@@ -84,102 +77,110 @@ def current_shift_key(now_utc: datetime | None = None) -> str | None:
 
 
 def current_weekday_key(now_utc: datetime | None = None) -> str:
-    """Lowercase weekday name in Atlanta local time."""
     now_utc = now_utc or datetime.now(timezone.utc)
     return _WEEKDAY_NAMES[now_utc.astimezone(ATLANTA_TZ).weekday()]
 
 
 def current_week_monday(now_utc: datetime | None = None) -> str:
-    """Return YYYY-MM-DD for the Monday of the current Atlanta-local week.
-
-    Kept around as a utility even though the schedule resolver no longer
-    filters by it — useful for logging which week is "expected."
-    """
     now_utc = now_utc or datetime.now(timezone.utc)
     local = now_utc.astimezone(ATLANTA_TZ).date()
     monday = local - _td(days=local.weekday())
     return monday.strftime("%Y-%m-%d")
 
 
-def _first_balanced_json_object(text: str, start: int) -> dict | None:
-    """Walk `text` starting at index `start`, find the next `{...}` with
-    balanced braces (respecting JSON strings), return the parsed object.
-    Returns None on no match or parse failure.
+def _iter_balanced_json_objects(text: str) -> Iterator[dict]:
+    """Yield every parseable balanced JSON object in `text` (top-level only).
+
+    Walks left to right. When a `{` is found, advances until the matching `}`
+    (respecting quoted strings), parses the slice, and yields the result if
+    parsing succeeds. Then continues scanning after the close brace.
     """
-    open_idx = text.find("{", start)
-    if open_idx == -1:
-        return None
-    depth = 0
-    in_string = False
-    escape = False
-    i = open_idx
-    while i < len(text):
-        c = text[i]
-        if escape:
-            escape = False
-        elif c == "\\" and in_string:
-            escape = True
-        elif c == '"':
-            in_string = not in_string
-        elif not in_string:
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = text[open_idx : i + 1]
-                    try:
-                        return json.loads(candidate)
-                    except json.JSONDecodeError:
-                        return None
-        i += 1
-    return None
+    pos = 0
+    n = len(text)
+    while pos < n:
+        start = text.find("{", pos)
+        if start == -1:
+            return
+        depth = 0
+        in_string = False
+        escape = False
+        i = start
+        end = -1
+        while i < n:
+            c = text[i]
+            if escape:
+                escape = False
+            elif c == "\\" and in_string:
+                escape = True
+            elif c == '"':
+                in_string = not in_string
+            elif not in_string:
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            i += 1
+        if end == -1:
+            return
+        try:
+            obj = json.loads(text[start:end])
+        except json.JSONDecodeError:
+            pos = start + 1  # advance just past this `{` and retry
+            continue
+        if isinstance(obj, dict):
+            yield obj
+        pos = end
 
 
 def _is_schedule_shape(obj) -> bool:
-    """Validate that a parsed object looks like a schedule.
+    """Validate that a parsed object actually looks like a schedule.
 
-    A real schedule has `weekOf` (string) and `days` (object). Without this
-    check, the tolerant parser would happily match any JSON object that
-    happens to follow a 'WEEKLY_SCHEDULE_JSON' mention in chat.
+    Requires weekOf:str, days:dict, and `days` containing at least one
+    weekday key (monday..sunday). This is specific enough that random JSON
+    in channel chatter won't false-positive.
     """
-    return (
-        isinstance(obj, dict)
-        and isinstance(obj.get("weekOf"), str)
-        and isinstance(obj.get("days"), dict)
-    )
+    if not isinstance(obj, dict):
+        return False
+    if not isinstance(obj.get("weekOf"), str):
+        return False
+    days = obj.get("days")
+    if not isinstance(days, dict):
+        return False
+    return any(d in _WEEKDAY_SET for d in days)
 
 
 def parse_schedule_message(text: str) -> dict | None:
-    """Extract WEEKLY_SCHEDULE_JSON from a Slack message body.
+    """Extract a schedule from a Slack message body.
 
-    Tolerant of formatting (with or without triple backticks, json fence,
-    Unicode smart quotes). Requires the parsed object to look like a real
-    schedule (weekOf + days) — random JSON in chatter does not match.
+    Strategy:
+      1. Normalize Unicode smart quotes -> straight quotes.
+      2. If a `WEEKLY_SCHEDULE_JSON` header is present, search after it
+         (preferred — the explicit marker tells us it IS a schedule).
+      3. Otherwise, scan the whole message for any JSON object that
+         matches the schedule shape (weekOf + days + weekday keys).
+      4. Return the first shape-matching object, or None.
     """
     if not text:
         return None
-    header = _HEADER_RE.search(text)
-    if not header:
-        return None
-    # Normalize curly quotes before parsing.
-    body = text[header.end():].translate(_SMART_QUOTE_MAP)
-    obj = _first_balanced_json_object(body, 0)
-    if obj is None:
+    normalized = text.translate(_SMART_QUOTE_MAP)
+
+    header = _HEADER_RE.search(normalized)
+    search_text = normalized[header.end():] if header else normalized
+
+    for obj in _iter_balanced_json_objects(search_text):
+        if _is_schedule_shape(obj):
+            return obj
+
+    if header:
         log.warning(
-            "Found WEEKLY_SCHEDULE_JSON header but could not parse a JSON "
-            "object after it. Message preview: %r",
+            "Found WEEKLY_SCHEDULE_JSON header but no valid schedule-shape "
+            "JSON after it. Preview: %r",
             text[: min(200, len(text))],
         )
-        return None
-    if not _is_schedule_shape(obj):
-        log.warning(
-            "Parsed JSON after WEEKLY_SCHEDULE_JSON header but it's not a "
-            "valid schedule shape (need weekOf + days). Keys: %r",
-            sorted(obj.keys()) if isinstance(obj, dict) else type(obj).__name__,
-        )
-        return None
-    return obj
+    return None
 
 
 def find_latest_schedule(messages: Iterable[dict]) -> dict | None:
@@ -196,7 +197,6 @@ def operators_on_shift(
     schedule: dict,
     now_utc: datetime | None = None,
 ) -> list[Operator]:
-    """Return the operators on shift right now, based on the schedule JSON."""
     shift_key = current_shift_key(now_utc)
     if shift_key is None:
         return []

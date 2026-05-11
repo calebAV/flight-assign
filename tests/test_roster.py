@@ -39,9 +39,12 @@ def test_parse_schedule_message():
 
 
 def test_parse_schedule_message_with_json_language_hint():
-    msg = "WEEKLY_SCHEDULE_JSON\n```json\n{\"weekOf\":\"2026-05-11\",\"days\":{}}\n```"
+    msg = ("WEEKLY_SCHEDULE_JSON\n```json\n"
+           '{"weekOf":"2026-05-11","days":{"monday":{"shift1":[]}}}'
+           "\n```")
     sched = parse_schedule_message(msg)
-    assert sched == {"weekOf": "2026-05-11", "days": {}}
+    assert sched is not None
+    assert sched["weekOf"] == "2026-05-11"
 
 
 def test_parse_schedule_message_no_match():
@@ -140,11 +143,12 @@ def test_parse_schedule_message_with_extra_text_around_json():
     """Tolerant parser: ignores leading/trailing chatter outside the JSON."""
     msg = (
         "Hey team! WEEKLY_SCHEDULE_JSON for the week:\n\n"
-        '{"weekOf":"2026-05-11","days":{}}\n\n'
+        '{"weekOf":"2026-05-11","days":{"monday":{"shift1":[]}}}\n\n'
         "Let me know if anything's wrong."
     )
     sched = parse_schedule_message(msg)
-    assert sched == {"weekOf": "2026-05-11", "days": {}}
+    assert sched is not None
+    assert sched["weekOf"] == "2026-05-11"
 
 
 def test_parse_schedule_message_with_nested_braces():
@@ -168,7 +172,7 @@ def test_parse_schedule_message_braces_in_strings_ignored():
     """A `{` inside a JSON string should not bump brace depth."""
     msg = (
         "WEEKLY_SCHEDULE_JSON\n"
-        '{"weekOf":"2026-05-11","note":"see }} below","days":{}}'
+        '{"weekOf":"2026-05-11","note":"see }} below","days":{"monday":{"shift1":[]}}}'
     )
     sched = parse_schedule_message(msg)
     assert sched is not None
@@ -236,8 +240,73 @@ def test_parse_schedule_message_mixed_quotes():
     """Some keys curly, some straight — common when partially edited in Slack."""
     msg = (
         "WEEKLY_SCHEDULE_JSON\n"
-        '{"weekOf": “2026-05-11”, "days": {}}'
+        '{"weekOf": “2026-05-11”, "days": {"monday":{"shift1":[]}}}'
     )
     sched = parse_schedule_message(msg)
     assert sched is not None
     assert sched["weekOf"] == "2026-05-11"
+
+
+# --- Regression: the exact format Caleb pasted into #flight-assign on 2026-05-11.
+# Mixed curly/straight quotes, no WEEKLY_SCHEDULE_JSON header.
+USER_REAL_PAYLOAD = """{
+  “weekOf”: “2026-05-11",
+  “days”: {
+    “monday”: {
+      “shift1”: [
+        {“name”: “Andrew Christiansen”, “role”: “Production”},
+        {“name”: “Kristen Lewis”, “role”: “Production”}
+      ],
+      “shift2": [
+        {“name”: “Jared Raines”, “role”: “Production”}
+      ]
+    },
+    “tuesday”: { “shift1": [], “shift2”: [] },
+    “wednesday”: { “shift1”: [], “shift2": [] },
+    “thursday”: { “shift1": [], “shift2”: [] },
+    “friday”: { “shift1”: [], “shift2": [] }
+  }
+}"""
+
+
+def test_parse_schedule_message_real_world_mixed_quotes_no_header():
+    """Caleb pasted JSON with no header and Slack-curlified quotes (some
+    sides straight). Parser must still find and parse it."""
+    sched = parse_schedule_message(USER_REAL_PAYLOAD)
+    assert sched is not None
+    assert sched["weekOf"] == "2026-05-11"
+    assert sched["days"]["monday"]["shift1"][0]["name"] == "Andrew Christiansen"
+    assert sched["days"]["monday"]["shift2"][0]["name"] == "Jared Raines"
+
+
+def test_parse_schedule_message_no_header_random_chatter_not_a_match():
+    """Without header, random JSON in chatter should NOT be treated as a schedule."""
+    msg = 'Hey what about {"foo": "bar"} or {"count": 42}? Thoughts?'
+    assert parse_schedule_message(msg) is None
+
+
+def test_parse_schedule_message_requires_weekday_key():
+    """JSON with weekOf + days but no weekday keys is suspicious — reject."""
+    msg = '{"weekOf": "2026-05-11", "days": {"someOtherKey": "x"}}'
+    assert parse_schedule_message(msg) is None
+
+
+def test_parse_schedule_message_no_header_picks_schedule_amid_chatter():
+    """If there's chatter JSON AND a real schedule, find the schedule."""
+    msg = (
+        'Random JSON: {"unrelated": true}\n\n'
+        'Then: {"weekOf": "2026-05-11", "days": {"monday": {"shift1": []}}}'
+    )
+    sched = parse_schedule_message(msg)
+    assert sched is not None
+    assert sched["weekOf"] == "2026-05-11"
+
+
+def test_parse_schedule_message_skips_invalid_json_continues_scanning():
+    """Broken JSON earlier in message shouldn't prevent finding a valid schedule later."""
+    msg = (
+        '{this is not json}\n'
+        '{"weekOf": "2026-05-11", "days": {"monday": {"shift1": []}}}'
+    )
+    sched = parse_schedule_message(msg)
+    assert sched is not None
