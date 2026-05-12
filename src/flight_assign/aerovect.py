@@ -94,6 +94,28 @@ class AeroVectClient:
         resp.raise_for_status()
         return resp.json().get("snapshots", [])
 
+    def get_flights(self, airport: str) -> dict[str, list[dict]]:
+        """Return the full /flights response: {"inbound": [...], "outbound": [...]}.
+
+        This endpoint returns the live tracked-flight list for the airport —
+        approximately the next ~4 hours of upcoming departures with all the
+        operational columns (dptr_gate, dptr_bag_pier_num, al_cde, mission_time,
+        etc.) populated. No time-window parameters; the API decides scope.
+        """
+        resp = self._session.get(
+            f"{API_BASE}/flights",
+            params={"airport": airport},
+            headers={"Authorization": self._bearer()},
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        # Always return a dict with both arrays present so callers can rely on shape.
+        return {
+            "inbound": list(body.get("inbound") or []),
+            "outbound": list(body.get("outbound") or []),
+        }
+
 
 def snapshot_airline(snap: dict, *, default: str = "") -> str:
     """Recover the airline code from a snapshot, even when airline_cde is null.
@@ -109,9 +131,13 @@ def snapshot_airline(snap: dict, *, default: str = "") -> str:
 
     Returns the uppercased airline code, or "" if unrecoverable.
     """
-    code = (snap.get("airline_cde") or "").strip().upper()
-    if code:
-        return code
+    # /nexus/snapshots calls this `airline_cde`; /flights calls it `al_cde`.
+    for key in ("airline_cde", "al_cde"):
+        code = (snap.get(key) or "")
+        if isinstance(code, str):
+            code = code.strip().upper()
+            if code:
+                return code
 
     fk = (snap.get("flight_key") or "").strip()
     if not fk or fk.startswith("PARTIAL"):

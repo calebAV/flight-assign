@@ -132,3 +132,41 @@ def test_real_world_partial_snapshot_with_dptr_gate_kept_by_filter():
     assert snapshot_gate(snap) == "A05"
     # pier comes from dptr_bag_pier_num; this snap has none → empty
     assert snapshot_pier(snap) == ""
+
+
+# --- /flights endpoint: snapshot_airline reads al_cde ---
+
+
+def test_snapshot_airline_reads_al_cde_field():
+    """/flights returns the airline as `al_cde`, not `airline_cde`."""
+    snap = {"al_cde": "DL", "flight_key": "2026-05-12#DL#1234#ATL#GSP"}
+    assert snapshot_airline(snap) == "DL"
+
+
+def test_snapshot_airline_prefers_airline_cde_over_al_cde():
+    """If both fields are present (unlikely, but defensive), documented wins."""
+    snap = {"airline_cde": "DL", "al_cde": "9E"}
+    assert snapshot_airline(snap) == "DL"
+
+
+def test_snapshot_airline_uppercases_al_cde():
+    assert snapshot_airline({"al_cde": "dl"}) == "DL"
+
+
+def test_snapshot_airline_uses_default_when_al_cde_empty():
+    snap = {"al_cde": "", "flight_key": "PARTIAL#2026-05-12#1234"}
+    assert snapshot_airline(snap, default="DL") == "DL"
+
+
+def test_snapshot_airline_real_flights_response_shape():
+    """Smoke test against the actual /flights record shape we saw."""
+    snap = {
+        "al_cde": "DL",
+        "flt_num": 1155,
+        "flight_key": "2026-05-12#DL#1155#ATL#BNA",
+        "dptr_gate": "B28",
+        "dptr_bag_pier_num": "91",
+        "mission_time": 1778594160000,
+        "cncl_ind": "N",
+    }
+    assert snapshot_airline(snap) == "DL"

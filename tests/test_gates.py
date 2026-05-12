@@ -14,6 +14,22 @@ from flight_assign.gates import filter_snapshots, is_target_gate
         ("A1", "A", True),
         ("A14", "A", True),
         ("A18", "A", True),
+        # Zero-padded variants — API returns "A02", "A09", etc.
+        ("A01", "A", True),
+        ("A02", "A", True),
+        ("A04", "A", True),
+        ("A05", "A", True),
+        ("A07", "A", True),
+        ("A09", "A", True),
+        ("A10", "A", True),
+        # Zero-padded T gates seen in the live data
+        ("T01", "T", True),
+        ("T01A", "T", True),
+        ("T02", "T", True),
+        ("T06", "T", True),
+        # Zero-padded A-North must still be excluded
+        ("A020", "A", False),
+        ("A025", "A", False),
         # A-North — excluded
         ("A19", "A", False),
         ("A22", "A", False),

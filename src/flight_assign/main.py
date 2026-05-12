@@ -128,11 +128,15 @@ def run() -> int:
     else:
         log.info("channels: single-channel mode (%s)", post_channel)
 
-    # 1) Pull flights.
+    # 1) Pull flights from /flights (live tracked-flight feed, ~4h horizon).
+    #    Replaced /nexus/snapshots — that endpoint frequently returns empty
+    #    or PARTIAL keys while /flights stays populated with the operational
+    #    columns we need (dptr_gate, dptr_bag_pier_num, al_cde, etc.).
     av = AeroVectClient(client_id, client_secret)
-    snapshots = av.get_snapshots(airport, hours_back=0, hours_forward=hours_forward)
+    flights_body = av.get_flights(airport)
+    snapshots = flights_body["outbound"]
     total_snapshots = len(snapshots)
-    log.info("fetched %d snapshots from /nexus/snapshots", total_snapshots)
+    log.info("fetched %d outbound flights from /flights", total_snapshots)
 
     if snapshots:
         log.info(
@@ -140,9 +144,16 @@ def run() -> int:
             [s.get("flight_key") for s in snapshots[:3]],
         )
 
-    # Count snapshots with NO usable gate (after applying dptr_gate fallback).
-    # That's the true "data degraded" signal — PARTIAL keys alone are fine
-    # when dptr_gate is populated.
+    # Drop cancellations before any further filtering. cncl_ind == "Y" means
+    # the flight is cancelled; "N" means active. /nexus/snapshots didn't
+    # surface this — /flights does.
+    cancelled = [s for s in snapshots if s.get("cncl_ind") == "Y"]
+    snapshots = [s for s in snapshots if s.get("cncl_ind") != "Y"]
+    if cancelled:
+        log.info("dropped %d cancelled flights", len(cancelled))
+    log.info("after cancellation filter: %d snapshots", len(snapshots))
+
+    # Count flights with NO usable gate as the "feed degraded" signal.
     from .aerovect import snapshot_gate
     no_gate_count = sum(1 for s in snapshots if not snapshot_gate(s))
     feed_health = FeedHealth(total=total_snapshots, partial=no_gate_count)
